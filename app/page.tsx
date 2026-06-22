@@ -297,7 +297,7 @@ export default function Page() {
               <span
                 style={{ color: "#cfccc4", borderRadius: "1px", userSelect: "none" }}
               >
-                proprietary logic
+                "proprietary logic"
               </span>{" "}
               beyond authorized scope.
             </div>
