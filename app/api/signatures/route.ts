@@ -50,8 +50,11 @@ function ok(count: number, cache: boolean) {
     {
       status: 200,
       headers: {
+        // Short edge cache so the public count feels live but Redis isn't hit on
+        // every single page view. The signer sees their own bump instantly via
+        // the client-side optimistic update regardless.
         "Cache-Control": cache
-          ? "s-maxage=30, stale-while-revalidate=300"
+          ? "s-maxage=10, stale-while-revalidate=20"
           : "no-store",
       },
     },
