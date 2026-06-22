@@ -1,0 +1,18 @@
+/* Ported verbatim from the Claude Design prototype (Give Me Fable Back.dc.html). */
+html, body { margin: 0; padding: 0; background: #0a0a0a; }
+*, *::before, *::after { box-sizing: border-box; }
+@keyframes fbk-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+::selection { background: #d9573a; color: #0a0a0a; }
+.fbk-row { display:flex; gap:24px; padding:20px 26px; font-size:14px; line-height:1.65; }
+.fbk-label { flex:0 0 152px; color:#6b6960; letter-spacing:0.1em; }
+@media (max-width: 560px) {
+  .fbk-row { flex-direction:column; gap:8px; padding:18px 20px; }
+  .fbk-label { flex:none; font-size:11px; }
+}
+
+/* Hover states — these reproduce the prototype's `style-hover` bindings,
+   which the Claude Design runtime applied via JS. */
+.fbk-sign,
+.fbk-share { transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease; }
+.fbk-sign:hover { background: #e46a4d !important; border-color: #e46a4d !important; }
+.fbk-share:hover { border-color: #4a4640 !important; color: #f4f1ea !important; }
