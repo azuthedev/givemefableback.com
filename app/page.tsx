@@ -330,7 +330,7 @@ export default function Page() {
             <div style={{ color: "#cfccc4" }}>
               Call made to the White House by the Secretary of Commerce,{" "}
               <span style={{ color: "#f4f1ea" }}>
-                Epstein affiliate Howard Lutnick
+                Howard Lutnick (named in Epstein files; told Congress he'd vowed to avoid Epstein after 2005, then admitted to a 2012 visit)
               </span>
               .
             </div>
