@@ -2,20 +2,63 @@ import { NextResponse } from "next/server";
 import { SIGNATURE_SOURCE, FALLBACK_COUNT } from "@/lib/config";
 
 export const runtime = "edge";
-export const revalidate = 300;
 
-function ok(count: number) {
-  const safe = Number.isFinite(count) ? Math.max(0, Math.round(count)) : FALLBACK_COUNT;
+const KEY = "fbk:signatures";
+const BASELINE = FALLBACK_COUNT;
+const IP_TTL_SECONDS = 86_400; // one sign per IP per 24h
+
+type KvEnv = { url: string; token: string };
+
+// Works with either the Vercel KV or the raw Upstash env var names.
+function kvEnv(): KvEnv | null {
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token =
+    process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+  return url && token ? { url, token } : null;
+}
+
+// Upstash REST: command + args as path segments, result returned as JSON { result }.
+async function kv(env: KvEnv, ...args: (string | number)[]): Promise<unknown> {
+  const path = args.map((a) => encodeURIComponent(String(a))).join("/");
+  const res = await fetch(`${env.url}/${path}`, {
+    headers: { Authorization: `Bearer ${env.token}` },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`kv ${res.status}`);
+  const data = (await res.json()) as { result?: unknown };
+  return data?.result;
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const buf = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(input),
+  );
+  return Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function toCount(v: unknown): number {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? Math.max(0, Math.round(n)) : FALLBACK_COUNT;
+}
+
+function ok(count: number, cache: boolean) {
   return NextResponse.json(
-    { count: safe },
+    { count: toCount(count) },
     {
       status: 200,
-      headers: { "Cache-Control": "s-maxage=300, stale-while-revalidate" },
+      headers: {
+        "Cache-Control": cache
+          ? "s-maxage=30, stale-while-revalidate=300"
+          : "no-store",
+      },
     },
   );
 }
 
-// Pull a number out of a parsed JSON body by trying the common keys.
+// ----- Legacy external source parsing (used only when KV isn't configured) -----
 function fromJson(data: unknown): number {
   if (typeof data === "number") return data;
   if (data && typeof data === "object") {
@@ -31,7 +74,6 @@ function fromJson(data: unknown): number {
   return NaN;
 }
 
-// Defensively scrape a count from an HTML page near "signatures"/"signed".
 function fromHtml(html: string): number {
   const patterns = [
     /([\d,]{1,12})\s*(?:signatures|signed)\b/i,
@@ -47,33 +89,74 @@ function fromHtml(html: string): number {
   return NaN;
 }
 
-export async function GET() {
+async function externalCount(): Promise<number> {
+  if (!SIGNATURE_SOURCE) return FALLBACK_COUNT;
   try {
-    if (!SIGNATURE_SOURCE) return ok(FALLBACK_COUNT);
-
     const res = await fetch(SIGNATURE_SOURCE, {
       next: { revalidate: 300 },
       headers: { Accept: "application/json, text/html;q=0.9" },
     });
-    if (!res.ok) return ok(FALLBACK_COUNT);
-
-    const contentType = res.headers.get("content-type") || "";
+    if (!res.ok) return FALLBACK_COUNT;
+    const ct = res.headers.get("content-type") || "";
     const looksJson =
-      contentType.includes("application/json") ||
-      contentType.includes("text/json") ||
-      /\.json(\?|$)/i.test(SIGNATURE_SOURCE);
+      ct.includes("json") || /\.json(\?|$)/i.test(SIGNATURE_SOURCE);
+    const n = looksJson ? fromJson(await res.json()) : fromHtml(await res.text());
+    return Number.isFinite(n) ? n : FALLBACK_COUNT;
+  } catch {
+    return FALLBACK_COUNT;
+  }
+}
 
-    if (looksJson) {
-      const data = await res.json();
-      const n = fromJson(data);
-      return ok(Number.isFinite(n) ? n : FALLBACK_COUNT);
+// Read the live count. Returns FALLBACK_COUNT on any failure (never throws).
+export async function GET() {
+  try {
+    const env = kvEnv();
+    if (!env) return ok(await externalCount(), true);
+
+    const v = await kv(env, "get", KEY);
+    if (v === null || v === undefined) {
+      await kv(env, "set", KEY, BASELINE, "NX"); // seed baseline once
+      return ok(BASELINE, true);
+    }
+    return ok(toCount(v), true);
+  } catch {
+    return ok(FALLBACK_COUNT, true);
+  }
+}
+
+// Record a signature. Atomic INCR, deduped per IP/day. Always 200.
+export async function POST(request: Request) {
+  try {
+    const env = kvEnv();
+    if (!env) return ok(FALLBACK_COUNT, false); // nothing to persist into yet
+
+    await kv(env, "set", KEY, BASELINE, "NX"); // ensure baseline exists
+
+    const ip =
+      (request.headers.get("x-forwarded-for") || "").split(",")[0].trim() ||
+      request.headers.get("x-real-ip") ||
+      "0.0.0.0";
+    const ipHash = await sha256Hex(ip);
+
+    // SET ... NX EX -> "OK" only the first time this IP signs within the window.
+    const firstTime = await kv(
+      env,
+      "set",
+      `fbk:ip:${ipHash}`,
+      "1",
+      "NX",
+      "EX",
+      IP_TTL_SECONDS,
+    );
+
+    if (firstTime === "OK") {
+      const next = await kv(env, "incr", KEY);
+      return ok(toCount(next), false);
     }
 
-    const text = await res.text();
-    const n = fromHtml(text);
-    return ok(Number.isFinite(n) ? n : FALLBACK_COUNT);
+    // Already signed recently from this IP — return the current count unchanged.
+    return ok(toCount(await kv(env, "get", KEY)), false);
   } catch {
-    // Any error/unparseable upstream -> fall back. Always 200, never 500.
-    return ok(FALLBACK_COUNT);
+    return ok(FALLBACK_COUNT, false);
   }
 }

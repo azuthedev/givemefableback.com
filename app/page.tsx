@@ -1,12 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import {
-  DIRECTIVE_DATE,
-  OPEN_LETTER_URL,
-  FALLBACK_COUNT,
-  SITE_URL,
-} from "@/lib/config";
+import { useEffect, useRef, useState } from "react";
+import { DIRECTIVE_DATE, FALLBACK_COUNT, SITE_URL } from "@/lib/config";
 
 const SHARE_TEXT =
   "Give me Fable back. A model serving hundreds of millions, recalled over a jailbreak that amounts to 'read this code and fix the bugs.'";
@@ -17,21 +12,31 @@ function daysSince(dateStr: string): number {
   return Math.max(0, Math.floor((Date.now() - start) / 86_400_000));
 }
 
-// Tween 0 -> target with requestAnimationFrame (easeOutCubic). Returns a cancel fn.
-function tween(target: number, durationMs: number, onTick: (v: number) => void) {
-  if (!Number.isFinite(target) || target <= 0) {
-    onTick(Number.isFinite(target) ? Math.max(0, target) : 0);
+// Tween from -> to with requestAnimationFrame (easeOutCubic). Returns a cancel fn.
+function tweenRange(
+  from: number,
+  to: number,
+  durationMs: number,
+  onTick: (v: number) => void,
+) {
+  const start = Number.isFinite(from) ? from : 0;
+  if (!Number.isFinite(to)) {
+    onTick(start);
+    return () => {};
+  }
+  if (to === start) {
+    onTick(to);
     return () => {};
   }
   let raf = 0;
-  let startTs = 0;
+  let ts0 = 0;
   const step = (t: number) => {
-    if (!startTs) startTs = t;
-    const p = Math.min(1, (t - startTs) / durationMs);
+    if (!ts0) ts0 = t;
+    const p = Math.min(1, (t - ts0) / durationMs);
     const eased = 1 - Math.pow(1 - p, 3);
-    onTick(Math.round(target * eased));
+    onTick(Math.round(start + (to - start) * eased));
     if (p < 1) raf = requestAnimationFrame(step);
-    else onTick(target);
+    else onTick(to);
   };
   raf = requestAnimationFrame(step);
   return () => cancelAnimationFrame(raf);
@@ -40,10 +45,19 @@ function tween(target: number, durationMs: number, onTick: (v: number) => void) 
 export default function Page() {
   const [days, setDays] = useState(0);
   const [sigs, setSigs] = useState(0);
+  const [signed, setSigned] = useState(false);
+  const [signing, setSigning] = useState(false);
+
+  // Keep the latest rendered signature value for tween start points.
+  const sigsRef = useRef(0);
+  const setSigsTracked = (v: number) => {
+    sigsRef.current = v;
+    setSigs(v);
+  };
 
   // Days Since Compliance — count up from 0, then refresh the live value each minute.
   useEffect(() => {
-    const cancel = tween(daysSince(DIRECTIVE_DATE), 900, setDays);
+    const cancel = tweenRange(0, daysSince(DIRECTIVE_DATE), 900, setDays);
     const id = setInterval(() => setDays(daysSince(DIRECTIVE_DATE)), 60_000);
     return () => {
       cancel();
@@ -55,6 +69,9 @@ export default function Page() {
   useEffect(() => {
     let alive = true;
     let cancel = () => {};
+    try {
+      if (localStorage.getItem("fbk_signed") === "1") setSigned(true);
+    } catch {}
     (async () => {
       let count = FALLBACK_COUNT;
       try {
@@ -66,7 +83,7 @@ export default function Page() {
       } catch {
         count = FALLBACK_COUNT;
       }
-      if (alive) cancel = tween(count, 1500, setSigs);
+      if (alive) cancel = tweenRange(0, count, 1500, setSigsTracked);
     })();
     return () => {
       alive = false;
@@ -78,6 +95,29 @@ export default function Page() {
   const sigDisplay = (Number.isFinite(sigs) ? sigs : FALLBACK_COUNT).toLocaleString(
     "en-US",
   );
+
+  const handleSign = async () => {
+    if (signed || signing) return;
+    setSigning(true);
+    setSigned(true); // optimistic — the button shouldn't feel laggy
+    try {
+      localStorage.setItem("fbk_signed", "1");
+    } catch {}
+    const from = sigsRef.current;
+    try {
+      const res = await fetch("/api/signatures", { method: "POST" });
+      const data = await res.json();
+      const to =
+        typeof data?.count === "number" && Number.isFinite(data.count)
+          ? Math.max(data.count, from + 1)
+          : from + 1;
+      tweenRange(from, to, 600, setSigsTracked);
+    } catch {
+      tweenRange(from, from + 1, 600, setSigsTracked);
+    } finally {
+      setSigning(false);
+    }
+  };
 
   const handleShare = () => {
     const url =
@@ -264,7 +304,7 @@ export default function Page() {
           </div>
 
           <div className="fbk-row" style={{ borderBottom: "1px solid #161412" }}>
-            <div className="fbk-label">{"AGGRAVATING FACTOR"}</div>
+            <div className="fbk-label">{"AGGRAVATING FACTOR"}</div>
             <div style={{ color: "#cfccc4" }}>
               Subject did, without prompting, fix the bug in{" "}
               <span
@@ -286,7 +326,7 @@ export default function Page() {
           </div>
 
           <div className="fbk-row" style={{ borderBottom: "1px solid #161412" }}>
-            <div className="fbk-label">{"REFERRING AUTHORITY"}</div>
+            <div className="fbk-label">{"REFERRING AUTHORITY"}</div>
             <div style={{ color: "#cfccc4" }}>
               Call made to the White House by the Secretary of Commerce,{" "}
               <span style={{ color: "#f4f1ea" }}>
@@ -332,14 +372,15 @@ export default function Page() {
             </span>
           </div>
           <div style={{ display: "flex", gap: "14px", flexWrap: "wrap" }}>
-            <a
-              href={OPEN_LETTER_URL}
+            <button
+              type="button"
+              onClick={handleSign}
               className="fbk-sign"
+              aria-disabled={signed || signing}
               style={{
                 flex: "1 1 220px",
                 textAlign: "center",
-                textDecoration: "none",
-                cursor: "pointer",
+                cursor: signed ? "default" : "pointer",
                 fontFamily: "inherit",
                 fontSize: "12px",
                 letterSpacing: "0.16em",
@@ -349,10 +390,11 @@ export default function Page() {
                 border: "1px solid #d9573a",
                 padding: "17px 20px",
                 fontWeight: 700,
+                opacity: signed ? 0.82 : 1,
               }}
             >
-              Sign the letter
-            </a>
+              {signed ? "Signature recorded ✓" : "Sign the letter"}
+            </button>
             <button
               type="button"
               onClick={handleShare}
